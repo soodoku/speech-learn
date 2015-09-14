@@ -407,7 +407,7 @@ summary(fit)
 plot(fit, pch=21, bg=c(6,5,4,3,2)[data_train$party])
 ```
 
-![plot of chunk pls](figure/pls-1.png) 
+![plot of chunk pls](../figure/pls-1.png) 
 
 ```r
 ppred <- predict(fit, newdata=test_mat)
