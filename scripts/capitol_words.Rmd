@@ -1,0 +1,240 @@
+### Capitol Words
+
+Estimate relationship between words that congressmembers use and vote based ideology estimates. 
+
+Load the libs
+
+```{r, eval=FALSE, load_libs}
+# Load libs
+library(readr) 	# read in big data a bit quicker
+library(tm)	   	# pre_process text
+library(glmnet) # for lasso
+library(knitr)
+```
+
+To begin, get the data for the 112th congress using the [Capitol Words API](capitol_speech.py). Then 
+[preprocess the data](https://github.com/soodoku/text-as-data/tree/master/preprocess_csv) and merge it with [DW-Nominate data](capitol_vote.R). 
+Once you have done that, select only the relevant columns (text, party and first dimension of ideology scores of the speakers).
+
+```{r, eval=FALSE, subsample}
+# Load Capitol Words
+cong 			<- read_csv("data/capitolwords_112_clean_dw.csv")
+cong			<- as.data.frame(cong)
+colnames(cong) 	<- make.names(colnames(cong))
+
+# Select columns you need, and only Republican and Democrat speech
+cong 		   <- subset(cong, subset=party!=328, select=c("bioguide_id", "speaking", "party", "dwnom1"))
+colnames(cong) <- c("bioguide_id", "text", "party", "dwnom1")
+```
+
+```{r inspect}
+# Check text field length
+cong$nletters <- sapply(cong$text, nchar)
+summary(cong$nletters)
+# lots of variation
+
+# Let us see what the short 'speeches' are about
+head(cong$text[cong$nletters < 150], 10)
+
+# This can be used to build a database of procedural statements that can
+# later be taken out. For now, we are filtering out just these statements. This 
+# leaves procedural language in rest of the rows intact
+cong <- subset(cong, cong$nletters > 149)
+```
+
+Next, it makes sense to collapse data by congressperson. Otherwise, we are exploiting within congressperson speech correlations. For other kinds of data, it is common to collapse into 5,000--10,000 word chunks. And then to create test and training data sets.
+
+```{r, eval=FALSE, agg}
+# First aggregate text by congressperson
+bymem 	 	 <- with(cong, tapply(text, bioguide_id, paste, collapse= ' '))
+bymem 	 	 <- data.frame(text=bymem, bioguide_id=rownames(bymem))
+bymem$nchars <- sapply(bymem$text, nchar)
+
+# Clumsy: Merge with dwnom1, and party
+congsmall <- cong[!duplicated(cong$bioguide_id), c("bioguide_id", "dwnom1", "party")]
+cong2     <- merge(bymem, congsmall , by="bioguide_id", all.x=T, all.y=F)
+```
+```{r eval=FALSE, sample}
+
+# Stratified sample
+# Takes data
+# column name of column with labels
+
+stratified <- function(data, labels, n_per_label, p=NA, seed=314159265){
+	dsample <- NULL
+	set.seed(seed)
+
+	for(i in levels(as.factor(data[,labels]))) 
+	{
+	  dsub 		<- data[data[,labels] == i,]
+	  if(is.na(p)){
+	  	dsub 	<- dsub[sample(1:nrow(dsub), n_per_label), ]
+	  }
+	  else{
+	  	dsub 	<- dsub[sample(1:nrow(dsub), ceiling(nrow(dsub) * p)), ]
+	  }
+	  dsample 	<- c(dsample, row.names(dsub))
+  	}
+	dsample
+}
+
+# Training data
+train_rows	<- stratified(cong2, "party", n_per_label=200)
+data_train 	<- cong2[train_rows,]
+
+# Test data 
+data_test <- cong2[-as.numeric(train_rows),]
+```
+
+Next, preprocess the text data, removing stop words, punctuations, numbers and converting text to lower case.
+
+```{r eval=FALSE, preprocess}
+# An abstract function to preprocess a text column
+preprocess <- function(text_column)
+{
+	# Use tm to get a doc matrix
+		corpus <- Corpus(VectorSource(text_column))
+	# all lower case
+		corpus <- tm_map(corpus, content_transformer(tolower))
+	# remove punctuation
+		corpus <- tm_map(corpus, content_transformer(removePunctuation))
+	# remove numbers
+		corpus <- tm_map(corpus, content_transformer(removeNumbers))
+	# remove stopwords
+		common <- tolower(read.csv("data/common_words.txt", header=F)$V1)
+		corpus <- tm_map(corpus, removeWords, c(stopwords("english"), common))
+	# stem document
+		corpus <- tm_map(corpus, stemDocument)
+	# strip white spaces (always at the end)
+		corpus <- tm_map(corpus, stripWhitespace)
+	# return
+		corpus	
+}
+
+# Get preprocess training and test data
+train_corpus <- preprocess(data_train$text)
+test_corpus  <- preprocess(data_test$text)
+```
+
+Next, create bigrams and trigrams and then dtms. Typically four-grams and larger n-grams will be very sparse. (Try it on a smaller dataset.)
+
+```{r eval=FALSE, tokenize}
+# Bi-Trigram tokenizer Func.
+bitrigramtokeniser <- function(x, n) {
+	RWeka:::NGramTokenizer(x, RWeka:::Weka_control(min = 2, max = 3))
+}
+
+# Create a Document Term Matrix for train and test
+# Bi- and Tri-	
+Sys.setenv(JAVA_HOME='C:/Program Files/Java/jre7/')
+library(rJava)
+library(RWeka)
+
+train_dtm  <- DocumentTermMatrix(train_corpus, control=list(wordLengths=c(2, Inf), tokenize = bitrigramtokeniser, 
+											   bounds=list(global=c(floor(length(test_corpus)*.15), Inf))))
+train_dtm2 <- removeSparseTerms(train_dtm, 0.90)
+
+test_dtm  <- DocumentTermMatrix(test_corpus,  control=list(wordLengths=c(2, Inf), tokenize = bitrigramtokeniser, 
+											  bounds=list(global=c(floor(length(test_corpus)*.05), Inf))))
+```
+
+Remove frequent phrases and get test matrix to have same colnames as train.
+
+```{r eval=FALSE, var-selection}
+# Test matrix maker
+testmat <- function(train_mat_cols, test_mat){	
+	# train_mat_cols <- colnames(train_mat); test_mat <- as.matrix(test_dtm)
+	test_mat 	<- test_mat[, colnames(test_mat) %in% train_mat_cols]
+	
+	miss_names 	<- train_mat_cols[!(train_mat_cols %in% colnames(test_mat))]
+	if(length(miss_names)!=0){
+		colClasses  <- rep("numeric", length(miss_names))
+		df 			<- read.table(text = '', colClasses = colClasses, col.names = miss_names)
+		df[1:nrow(test_mat),] <- 0
+		test_mat 	<- cbind(test_mat, df)
+	}
+	as.matrix(test_mat)
+}
+
+# Train and test matrices
+train_mat  <- as.matrix(train_dtm2)
+train_mat  <- train_mat/rowSums(train_mat)
+test_mat   <- testmat(colnames(train_mat), as.matrix(test_dtm))
+test_mat   <- test_mat/rowSums(test_mat)
+```
+
+Now, lets model the relationship between vote based ideology measures and text. 
+
+```{r modeling}
+# Fit the model (cross-validated lambda)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#library(doMC);registerDoMC(cores=8)
+fit_lasso 	<- cv.glmnet(train_mat, data_train$dwnom1, nfolds=5, alpha=1)
+pred 		<- predict(fit_lasso, newx= test_mat, s = "lambda.min")
+
+# Prediction Accuracy
+cor(pred, data_test$dwnom1)
+cor(pred[data_test$party==100], data_test$dwnom1[data_test$party==100])
+cor(pred[data_test$party==200], data_test$dwnom1[data_test$party==200])
+```
+
+Predicting the party as that is where the information is: 
+
+```{r party_model}
+# Predict R/D
+fit_lasso 	<- cv.glmnet(train_mat, data_train$party, nfolds=5, alpha=1, family = "binomial", type.measure="class")
+pred 		<- predict(fit_lasso, newx= test_mat, s = "lambda.min", type="response")
+
+# Prediction Accuracy
+table(pred > .5, data_test$party)
+sum(diag(table(pred > .5, data_test$party)))/sum(table(pred > .5, data_test$party))
+
+# Prediction Accuracy w/ dwnom1
+cor(pred, data_test$dwnom1)
+cor(pred[data_test$party==100], data_test$dwnom1[data_test$party==100])
+cor(pred[data_test$party==200], data_test$dwnom1[data_test$party==200])
+```
+
+Using PCA
+
+```{r pca}
+# PCA
+# pca <- prcomp(train_mat, scale=TRUE)
+
+# Sparse PCA
+library(irlba)
+pc <- train_mat %*% irlba(train_mat, nv=5, nu=0)$v
+cor(pc[,1], data_train$dwnom1)
+
+# CA -- later
+```
+
+Using MNLM
+
+```{r textir}
+# textir
+library(textir)
+cl <- makeCluster(detectCores())
+fits <- mnlm(cl, data_train$party, train_mat, bins=5,nlambda=10)
+stopCluster(cl)
+ 
+## extract coefficients
+B <- coef(fits)
+mean(B[-1,]==0) # sparsity in loadings
+## some big loadings on `overall'
+B[2,order(B[2,])[1:10]]
+B[2,order(-B[2,])[1:10]]
+B@Dimnames[[2]][order(-B@x)][1:50]
+```
+Using partial least squares: 
+
+```{r pls}
+# Partial least squares
+fit <- pls(train_mat, data_train$dwnom1, K=5)
+summary(fit)
+plot(fit, pch=21, bg=c(6,5,4,3,2)[data_train$party])
+ppred <- predict(fit, newdata=test_mat)
+cor(ppred, data_test$dwnom1)
+cor(ppred[data_test$party==100], data_test$dwnom1[data_test$party==100])
+cor(ppred[data_test$party==200], data_test$dwnom1[data_test$party==200])
+```
