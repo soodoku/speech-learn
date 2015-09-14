@@ -8,5 +8,9 @@ This is an example for how to use text as data.
 3. [Merge speech data with DW-Nominate data from Voteview](scripts/capitol_vote.R)
 4. [Model](scripts/capitol_words.md)
 
+#### Suggested Reading
+1. See [What Drives Media Slant (pdf)](http://web.stanford.edu/~gentzkow/research/biasmeas.pdf)
+2. [A Measure of Media Bias (pdf)](http://www.sscnet.ucla.edu/polisci/faculty/groseclose/pdfs/MediaBias.pdf)
+
 #### License
 Scripts are released under the [MIT License](License.md).
