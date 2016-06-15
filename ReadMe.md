@@ -1,5 +1,7 @@
 ### Speech Learn: Model Relationship Between Congressional Speech and Ideology 
 
+[![Code Issues](https://www.quantifiedcode.com/api/v1/project/f1ad09312b9148b5bb9469132bbdb3d7/badge.svg)](https://www.quantifiedcode.com/app/project/f1ad09312b9148b5bb9469132bbdb3d7)
+
 This is an example for how to use text as data. 
 
 #### Steps
